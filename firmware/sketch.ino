@@ -1,7 +1,13 @@
+
+#include <Preferences.h>
+
+Preferences preferences;
+
+
 const int MQ2_PIN=34;
 unsigned long prevMillis =0;
-const unsigned long interval =10000;//10000
-const unsigned long warmUpTime=30000;//30000
+const unsigned long interval =10000;
+const unsigned long warmUpTime=30000;
 bool checkResponse = false;
 const int minGasValue=100;
 const int maxGasValue=4000;
@@ -14,17 +20,32 @@ const unsigned long frozenTimeMillis=60000;
 bool frozenResponse= false;
 
 int validCount=0;
-int totalGasValue=0;
-int minGasReading=0;
-int maxGasReading=0;
+float totalGasValue=0;
+float minGasReading=0;
+float maxGasReading=0;
 unsigned long reportTimerMillis=0;
 const unsigned long reportMillis=30000; 
+
+float calibrationGain=1.0;
+float calibrationOffset=0.0;
 
 void setup() {
   // put your setup code here, to run once:
 
 
+  
   Serial.begin(115200);
+
+  preferences.begin("calibration", false);
+  calibrationGain=preferences.getFloat("gain",1.0);
+  calibrationOffset=preferences.getFloat("offset",0.0);
+Serial.print("Loaded Gain: ");
+Serial.println(calibrationGain);
+
+Serial.print("Loaded Offset: ");
+Serial.println(calibrationOffset);
+
+
   startMillis=millis();
   pinMode(MQ2_PIN, INPUT);
   Serial.println("Hello, ESP32!");
@@ -33,6 +54,32 @@ void setup() {
 
 void loop() {
   // put your main code here, to run repeatedly:
+
+    if(Serial.available()){
+      char command = Serial.read();
+
+      if(command == 'g'){
+        float value = Serial.parseFloat();
+        updateGain(value);
+        Serial.println("gain updated and saved");
+      }
+
+      if(command =='o'){
+        float value =Serial.parseFloat();
+        updateOffset(value);
+        Serial.println("Offset updated and saved");
+      }
+    }
+
+if (Serial.available()) {
+    char command = Serial.read();
+
+    if (command == 'r') {
+        ESP.restart();
+    }
+}
+
+
 
 
   
@@ -45,25 +92,33 @@ void loop() {
   if(currMillis-prevMillis >= interval){
     prevMillis=currMillis;
     bool isValid=true;
+
   int gasvalue=analogRead(MQ2_PIN);
   
-  if(gasvalue==0){
+float calibratedValue= (gasvalue * calibrationGain)+calibrationOffset;
+
+  if(calibratedValue==0){
     isValid=false;
     Serial.println("ERROR: no sensor response ");
   }
-  else if(gasvalue<minGasValue || gasvalue > maxGasValue){
+  else if(calibratedValue<minGasValue || calibratedValue > maxGasValue){
   isValid=false;
   Serial.println("ERROR:sensor out of range");
   
   }
   else{
-    if(gasvalue != lastGasValue){
-    lastGasValue = gasvalue;
+    if(calibratedValue != lastGasValue){
+    lastGasValue = calibratedValue;
     sameValueStartMillis = currMillis;
     frozenResponse = false;
 
     Serial.print("MQ2 VALUE: ");
-    Serial.println(gasvalue);
+    Serial.println(calibratedValue);
+    Serial.print("Raw Value: ");
+Serial.println(gasvalue);
+
+Serial.print("Calibrated Value: ");
+Serial.println(calibratedValue);
   }
   else{
     if(currMillis - sameValueStartMillis >= frozenTimeMillis){
@@ -76,18 +131,23 @@ void loop() {
     }
     else{
       Serial.print("MQ2 VALUE: ");
-      Serial.println(gasvalue);
+      Serial.println(calibratedValue);
+      Serial.print("Raw Value: ");
+Serial.println(gasvalue);
+
+Serial.print("Calibrated Value: ");
+Serial.println(calibratedValue);
     }
 
     
   
   }if(isValid){
-    totalGasValue+=gasvalue;
+    totalGasValue+=calibratedValue;
     validCount++;
-    if(validCount==1 || gasvalue<minGasReading){
-      minGasReading=gasvalue;}
-    if(validCount==1 || gasvalue<maxGasReading){
-      maxGasReading=gasvalue;}  
+    if(validCount==1 || calibratedValue<minGasReading){
+      minGasReading=calibratedValue;}
+    if(validCount==1 || calibratedValue>maxGasReading){
+      maxGasReading=calibratedValue;}  
 
   }}}
   
@@ -113,6 +173,7 @@ void loop() {
       minGasReading=0;
       maxGasReading=0;
       validCount=0;
+      totalGasValue=0;
 
     }else{
        Serial.println("60'Sec Summary:");
@@ -122,6 +183,24 @@ void loop() {
     }
   }
 }
+}
+
+void updateGain(float newGain){
+  calibrationGain=newGain;
+  preferences.putFloat("gain",calibrationGain);
+  
+    Serial.print("Saved Gain: ");
+    Serial.println(preferences.getFloat("gain", 1.0));
+
+}
+
+void updateOffset(float newOffset){
+  calibrationOffset=newOffset;
+  preferences.putFloat("offset",calibrationOffset);
+
+  Serial.print("Saved Offset: ");
+    Serial.println(preferences.getFloat("offset", 0.0));
+
 }
   
   
