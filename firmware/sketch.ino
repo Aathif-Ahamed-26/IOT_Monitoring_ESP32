@@ -2,6 +2,7 @@
 #include <LittleFS.h>
 #include <Preferences.h>
 #include <PubSubClient.h>
+#include <esp_task_wdt.h>
 
 Preferences preferences;
 Preferences bufferPref;
@@ -42,12 +43,14 @@ const char* mqttServer ="broker.hivemq.com";
 const int mqttPort =1883;
 const char* mqttTopic="Aathif/esp32/gas-monitor";
 
+unsigned long lastWifiAttempt=0;
+unsigned long lastMqttAttempt=0;
 
-// const int bufferCapacity=10;
-// int bufferCount=0;
-// unsigned long recordTimeStamp=0;
-// int bufferTail=0;
-// int bufferHead=0;
+unsigned long wifiRetryInterval=5000;
+unsigned long mqttRetryInterval=5000;
+
+
+
 
 void setup() {
   // put your setup code here, to run once:
@@ -64,72 +67,96 @@ Serial.println(calibrationGain);
 
 Serial.print("Loaded Offset: ");
 Serial.println(calibrationOffset);
-    WiFi.begin(ssid,password);
-    Serial.println("connecting to wifi ");
-
-    while(WiFi.status() != WL_CONNECTED){
-      delay(500);
-      Serial.print(".");
-    }
-    Serial.println("\nWifi connected");
-
-  //   bufferPref.begin("buffer",false);
-  //   bufferCount=bufferPref.getInt("count",0);
-
-
-  // bufferCount= bufferPref.getInt("count",0);
-
-  // bufferHead =bufferPref.getInt("head",0);
-  // bufferTail= bufferPref.getInt("tail",0);
+   WiFi.begin(ssid,password);
+Serial.println("WiFi connection started. Connecting in background...");
+ 
  mqttClient.setServer(mqttServer,mqttPort); 
 
- if (!LittleFS.begin(false)) {
+ if (!LittleFS.begin(true)) {
     Serial.println("LittleFS mount failed");
     return;
 }
 
 Serial.println("LittleFS mounted successfully");
-    sendSavedData();
+    
 
 
   startMillis=millis();
   pinMode(MQ2_PIN, INPUT);
   Serial.println("Hello, ESP32!");
   Serial.println("MQ-2 is warming up");
+  esp_task_wdt_config_t wdt_config = {
+    .timeout_ms = 10000,
+    .idle_core_mask = 0,
+    .trigger_panic = true
+};
+
+esp_task_wdt_reconfigure(&wdt_config);
+esp_task_wdt_add(NULL);
+
   
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-
+    esp_task_wdt_reset();
+//     while (true) {
+// }
     mqttClient.loop();
 
-    if(Serial.available()){
-      char command = Serial.read();
+if (Serial.available() > 0) {
 
-      if(command == 'g'){
-        float value = Serial.parseFloat();
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+
+    Serial.print("Command received: ");
+    Serial.println(command);
+
+    if (command.startsWith("g")) {
+        float value = command.substring(1).toFloat();
         updateGain(value);
-        Serial.println("gain updated and saved");
-      }
+        Serial.println("Gain updated and saved");
+    }
 
-      if(command =='o'){
-        float value =Serial.parseFloat();
+    else if (command.startsWith("o")) {
+        float value = command.substring(1).toFloat();
         updateOffset(value);
         Serial.println("Offset updated and saved");
-      }
     }
 
-if (Serial.available()) {
-    char command = Serial.read();
-
-    if (command == 'r') {
+    else if (command == "r") {
+        Serial.println("Restarting ESP32...");
         ESP.restart();
     }
+
+    else if (command == "d") {
+        WiFi.disconnect();
+        Serial.println("WiFi disconnected");
+    }
+
+    else if (command == "w") {
+        WiFi.begin(ssid, password);
+        Serial.println("Connecting to WiFi...");
+    }
+    else if (command == "sd") {
+    checkResponse = true;
+    Serial.println("Sensor disconnected!");
 }
 
-if(WiFi.status() ==WL_CONNECTED){
-  connectMqtt();
+else if (command == "sr") {
+    checkResponse = false;
+    Serial.println("Sensor reconnected!");
+}
+}
+if (WiFi.status() != WL_CONNECTED) {
+    if (millis() - lastWifiAttempt>=wifiRetryInterval) {
+        lastWifiAttempt=millis();
+        Serial.println("Reconnecting to WiFi...");
+        WiFi.begin(ssid,password);
+    }
+}
+else {
+    connectMqtt();
 }
 
 
@@ -150,7 +177,7 @@ if(WiFi.status() ==WL_CONNECTED){
   
 float calibratedValue= (gasvalue * calibrationGain)+calibrationOffset;
 
-  if(calibratedValue==0){
+  if(gasvalue==0){
     isValid=false;
     Serial.println("ERROR: no sensor response ");
   }
@@ -217,7 +244,8 @@ if (mqttClient.connected()) {
     publishSensorData(avgGasValue, minGasReading,
                       maxGasReading, validCount, timeStamp);
 } else {
-    saveDataOffline(avgGasValue, timeStamp);
+    saveDataOffline(avgGasValue, minGasReading,
+                maxGasReading, validCount, timeStamp);
 }
 
       Serial.println("60'Sec Summary:");
@@ -263,28 +291,9 @@ void updateOffset(float newOffset){
     Serial.println(preferences.getFloat("offset", 0.0));
 
 }
-
-
-
-// void savebufferCount(){
-// bufferPref.putInt("count",bufferCount);
-// bufferPref.putInt("head",bufferHead);
-// bufferPref.putInt("tail",bufferTail);
-// }
-// void saveRecord(float value,unsigned long timeStamp){
-
-
-//   if(bufferCount>=bufferCapacity){
-//     Serial.println("Buffer full! cannot save record");
-//     return;
-//   }
-// }
-// struct SensorRecord {
-//     float value;
-//     unsigned long timestamp;
-// };
   
-  void saveDataOffline(float value, unsigned long timeStamp) {
+  void saveDataOffline( float avg, float minVal,
+                float maxVal, float count, unsigned long timeStamp) {
     File file = LittleFS.open("/offline_data.csv", FILE_APPEND);
 
     if(!file){
@@ -294,36 +303,58 @@ void updateOffset(float newOffset){
 
     file.print(timeStamp);
     file.print(",");
-    file.println(value);
-
+    file.print(avg);
+    file.print(",");
+    file.print(minVal);
+    file.print(",");
+    file.print(maxVal);
+    file.print(",");
+    file.println(count);
     file.close();
 
     Serial.println("Data saved offline");
-    sendSavedData();
+    
 }
-
 void sendSavedData() {
+
     File file = LittleFS.open("/offline_data.csv", FILE_READ);
 
-    if (!file || file.size()==0) {
-        if(file)file.close();
+    if (!file || file.size() == 0) {
+        if (file) file.close();
         return;
     }
 
-    while(file.available()) {
+    while (file.available()) {
+
         String line = file.readStringUntil('\n');
-        Serial.print("Saved record: ");
-        Serial.println(line);
+
+        unsigned long timeStamp;
+        float avg, minVal, maxVal;
+        int count;
+
+        sscanf(line.c_str(), "%lu,%f,%f,%f,%d",
+               &timeStamp, &avg, &minVal, &maxVal, &count);
+
+        if (!publishSensorData(avg, minVal, maxVal, count, timeStamp)) {
+    file.close();
+    Serial.println("Publish failed. Keeping offline records.");
+    return;
+}
     }
 
     file.close();
+    LittleFS.remove("/offline_data.csv");
+Serial.println("Offline records cleared");
 }
-
 void connectMqtt(){
   if (!mqttClient.connected()) {
-        Serial.println("Connecting to MQTT...");
+        
+        if (millis() - lastMqttAttempt >= mqttRetryInterval) {
+            Serial.println("Connecting to MQTT...");
+            lastMqttAttempt = millis();
   if(mqttClient.connect("esp32-gas-monitor-001")){
     Serial.println("MQTT connected");
+    sendSavedData();
   }else{
     Serial.print("MQTT connection Failed");
     Serial.println(mqttClient.state());
@@ -333,8 +364,9 @@ Serial.print("WiFi status: ");
 Serial.println(WiFi.status());
 }
 }
+}
 
-void publishSensorData(float avg, float minVal,
+bool publishSensorData(float avg, float minVal,
                        float maxVal, int count,
                        unsigned long timeStamp) {
 
@@ -346,8 +378,15 @@ void publishSensorData(float avg, float minVal,
     payload += "\"valid_count\":" + String(count);
     payload += "}";
 
-    mqttClient.publish(mqttTopic, payload.c_str());
+    bool success = mqttClient.publish(mqttTopic, payload.c_str());
 
+if (success) {
+    Serial.println("MQTT record published successfully:");
+    Serial.println(payload);
+} else {
+    Serial.println("MQTT publish failed");
+}
     Serial.println("MQTT record published:");
     Serial.println(payload);
+    return success;
 }
