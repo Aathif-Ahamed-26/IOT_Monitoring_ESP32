@@ -4,6 +4,8 @@
 #include <PubSubClient.h>
 #include <esp_task_wdt.h>
 
+#include <time.h>
+
 Preferences preferences;
 Preferences bufferPref;
 
@@ -41,7 +43,9 @@ PubSubClient mqttClient(espClient);
 
 String mqttServer = "broker.hivemq.com";
 const int mqttPort =1883;
-const char* mqttTopic="Aathif/esp32/gas-monitor";
+const char* mqttTopic="Aathif/devices/ESP32_001/gas-monitor";  //format: Aathif/devices/device id add it /gas-monitor
+
+const char* healthTopic = "Aathif/devices/ESP32_001/health";
 
 unsigned long lastWifiAttempt=0;
 unsigned long lastMqttAttempt=0;
@@ -51,6 +55,27 @@ unsigned long mqttRetryInterval=5000;
 
 
 
+
+unsigned long lastHealthReport = 0;
+const unsigned long healthReportInterval = 60000;
+
+String lastError = "None";
+
+
+void syncTime() {
+    configTime(0, 0, "pool.ntp.org");
+    Serial.println("NTP time synchronization requested");
+}
+unsigned long getTimeStamp() {
+    time_t now;
+    time(&now);
+
+    if (now < 1000000000) {
+        return 0;
+    }
+
+    return (unsigned long)now;
+}
 
 
 
@@ -82,6 +107,7 @@ Serial.println(calibrationGain);
 Serial.print("Loaded Offset: ");
 Serial.println(calibrationOffset);
    WiFi.begin(ssid,password);
+   syncTime();
 Serial.println("WiFi connection started. Connecting in background...");
  
  mqttClient.setServer(mqttServer.c_str(),mqttPort); 
@@ -117,6 +143,10 @@ void loop() {
 //     while (true) {
 // }
     mqttClient.loop();
+if (millis() - lastHealthReport >= healthReportInterval) {
+    lastHealthReport = millis();
+    publishHealthStatus();
+}
 
 if (Serial.available() > 0) {
 
@@ -315,7 +345,7 @@ Serial.println(calibratedValue);
 if (mqttClient.connected()) {
     publishSensorData(avgGasValue, minGasReading,
                       maxGasReading, validCount, timeStamp);
-} else {
+} else {unsigned long timeStamp = getTimeStamp();
     saveDataOffline(avgGasValue, minGasReading,
                 maxGasReading, validCount, timeStamp);
 }
@@ -455,12 +485,14 @@ bool publishSensorData(float avg, float minVal,
                        unsigned long timeStamp) {
 
     String payload = "{";
-    payload += "\"timestamp\":" + String(timeStamp) + ",";
-    payload += "\"average\":" + String(avg, 2) + ",";
-    payload += "\"minimum\":" + String(minVal, 2) + ",";
-    payload += "\"maximum\":" + String(maxVal, 2) + ",";
-    payload += "\"valid_count\":" + String(count);
-    payload += "}";
+payload += "\"device_id\":\"ESP32_001\",";
+payload += "\"firmware_version\":\"1.0.0\",";
+payload += "\"timestamp\":" + String(timeStamp) + ",";
+payload += "\"average\":" + String(avg, 2) + ",";
+payload += "\"minimum\":" + String(minVal, 2) + ",";
+payload += "\"maximum\":" + String(maxVal, 2) + ",";
+payload += "\"valid_count\":" + String(count);
+payload += "}";
 
     bool success = mqttClient.publish(mqttTopic, payload.c_str());
 
@@ -508,4 +540,30 @@ void updateRetryIntervals(unsigned long newWifiInterval, unsigned long newMqttIn
     preferences.putULong("mqtt_retry", mqttRetryInterval);
 
     Serial.println("Retry intervals saved successfully");
+}
+
+void publishHealthStatus() {
+String payload = "{";
+
+payload += "\"uptime\":" + String(millis() / 1000) + ",";
+payload += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+payload += "\"wifi_connected\":";
+payload += (WiFi.status() == WL_CONNECTED ? "true" : "false");
+payload += ",";
+payload += "\"mqtt_connected\":";
+payload += (mqttClient.connected() ? "true" : "false");
+payload += ",";
+payload += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
+payload += "\"sensor_status\":";
+payload += (checkResponse ? "\"disconnected\"" : "\"connected\"");
+payload += ",";
+payload += "\"last_error\":\"" + lastError + "\",";
+payload += "\"reset_reason\":" + String((int)esp_reset_reason());
+payload += "}";
+
+    if (mqttClient.connected()) {
+        mqttClient.publish(healthTopic, payload.c_str());
+        Serial.println("Health status published:");
+        Serial.println(payload);
+    }
 }
