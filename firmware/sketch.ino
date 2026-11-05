@@ -7,8 +7,8 @@
 Preferences preferences;
 Preferences bufferPref;
 
-const char* ssid="Wokwi-GUEST";
-const char* password="";
+String ssid = "Wokwi-GUEST";
+String password = "";
 
 
 const int MQ2_PIN=34;
@@ -39,7 +39,7 @@ float calibrationOffset=0.0;
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-const char* mqttServer ="broker.hivemq.com";
+String mqttServer = "broker.hivemq.com";
 const int mqttPort =1883;
 const char* mqttTopic="Aathif/esp32/gas-monitor";
 
@@ -60,6 +60,18 @@ void setup() {
   Serial.begin(115200);
 
   preferences.begin("calibration", false);
+  wifiRetryInterval = preferences.getULong("wifi_retry", 5000);
+mqttRetryInterval = preferences.getULong("mqtt_retry", 5000);
+  mqttServer = preferences.getString("mqtt_server", "broker.hivemq.com");
+  ssid = preferences.getString("ssid", "Wokwi-GUEST");
+password = preferences.getString("password", "");
+Serial.print("Loaded WiFi SSID: ");
+Serial.println(ssid);
+
+
+
+  Serial.print("Loaded MQTT Server: ");
+ Serial.println(mqttServer);
   calibrationGain=preferences.getFloat("gain",1.0);
   calibrationOffset=preferences.getFloat("offset",0.0);
 Serial.print("Loaded Gain: ");
@@ -70,7 +82,7 @@ Serial.println(calibrationOffset);
    WiFi.begin(ssid,password);
 Serial.println("WiFi connection started. Connecting in background...");
  
- mqttClient.setServer(mqttServer,mqttPort); 
+ mqttClient.setServer(mqttServer.c_str(),mqttPort); 
 
  if (!LittleFS.begin(true)) {
     Serial.println("LittleFS mount failed");
@@ -112,7 +124,65 @@ if (Serial.available() > 0) {
     Serial.print("Command received: ");
     Serial.println(command);
 
-    if (command.startsWith("g")) {
+    if (command.startsWith("server")) {
+    String newServer = command.substring(7);
+    updateMqttServer(newServer);
+}
+if (command.startsWith("wifi ")) {
+
+    int separator = command.indexOf(' ', 5);
+
+    if (separator > 0) {
+        String newSsid = command.substring(5, separator);
+        String newPassword = command.substring(separator + 1);
+
+        updateWifiCredentials(newSsid, newPassword);
+    }
+}
+else if (command.startsWith("retry ")) {
+
+    int separator = command.indexOf(' ', 6);
+
+    if (separator > 0) {
+        unsigned long newWifi = command.substring(6, separator).toInt();
+        unsigned long newMqtt = command.substring(separator + 1).toInt();
+
+        if (newWifi >= 1000 && newMqtt >= 1000) {
+            updateRetryIntervals(newWifi, newMqtt);
+        } else {
+            Serial.println("Retry intervals must be at least 1000 ms");
+        }
+    } else {
+        Serial.println("Usage: retry 5000 7000");
+    }
+}else if (command == "status") {
+
+    Serial.println("\n--- DEVICE STATUS ---");
+
+    Serial.print("WiFi: ");
+    Serial.println(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
+
+    Serial.print("MQTT: ");
+    Serial.println(mqttClient.connected() ? "Connected" : "Disconnected");
+
+    Serial.print("MQTT Server: ");
+    Serial.println(mqttServer);
+
+    Serial.print("WiFi Retry: ");
+    Serial.print(wifiRetryInterval);
+    Serial.println(" ms");
+
+    Serial.print("MQTT Retry: ");
+    Serial.print(mqttRetryInterval);
+    Serial.println(" ms");
+
+    Serial.print("Sensor Monitoring: ");
+    Serial.println(checkResponse ? "Enabled" : "Disabled");
+
+    Serial.println("---------------------");
+}
+
+  else if (command.startsWith("g")) {
         float value = command.substring(1).toFloat();
         updateGain(value);
         Serial.println("Gain updated and saved");
@@ -135,7 +205,7 @@ if (Serial.available() > 0) {
     }
 
     else if (command == "w") {
-        WiFi.begin(ssid, password);
+        WiFi.begin(ssid.c_str(), password.c_str());
         Serial.println("Connecting to WiFi...");
     }
     else if (command == "sd") {
@@ -152,7 +222,7 @@ if (WiFi.status() != WL_CONNECTED) {
     if (millis() - lastWifiAttempt>=wifiRetryInterval) {
         lastWifiAttempt=millis();
         Serial.println("Reconnecting to WiFi...");
-        WiFi.begin(ssid,password);
+        WiFi.begin(ssid.c_str(),password.c_str());
     }
 }
 else {
@@ -389,4 +459,39 @@ if (success) {
     Serial.println("MQTT record published:");
     Serial.println(payload);
     return success;
+}
+void updateMqttServer(String newServer) {
+    mqttClient.disconnect();
+
+    mqttServer = newServer;
+
+    preferences.putString("mqtt_server", mqttServer);
+
+    Serial.print("New MQTT Server saved: ");
+    Serial.println(mqttServer);
+
+}
+void updateWifiCredentials(String newSsid, String newPassword) {
+
+    ssid = newSsid;
+    password = newPassword;
+
+    preferences.putString("ssid", ssid);
+    preferences.putString("password", password);
+
+    WiFi.disconnect();
+  WiFi.begin(ssid.c_str(), password.c_str());
+
+    Serial.println("WiFi credentials saved successfully");
+
+}
+void updateRetryIntervals(unsigned long newWifiInterval, unsigned long newMqttInterval) {
+
+    wifiRetryInterval = newWifiInterval;
+    mqttRetryInterval = newMqttInterval;
+
+    preferences.putULong("wifi_retry", wifiRetryInterval);
+    preferences.putULong("mqtt_retry", mqttRetryInterval);
+
+    Serial.println("Retry intervals saved successfully");
 }
