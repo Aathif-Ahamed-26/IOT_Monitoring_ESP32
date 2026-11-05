@@ -1,20 +1,26 @@
-
+#include<WiFi.h>
+#include <LittleFS.h>
 #include <Preferences.h>
+#include <PubSubClient.h>
 
 Preferences preferences;
+Preferences bufferPref;
+
+const char* ssid="Wokwi-GUEST";
+const char* password="";
 
 
 const int MQ2_PIN=34;
 unsigned long prevMillis =0;
-const unsigned long interval =10000;
-const unsigned long warmUpTime=30000;
+const unsigned long interval =1000; //1000
+const unsigned long warmUpTime=3000;
 bool checkResponse = false;
 const int minGasValue=100;
 const int maxGasValue=4000;
 unsigned long startMillis=0;
 int lastGasValue=-1;
 unsigned long sameValueStartMillis=0;
-const unsigned long frozenTimeMillis=60000;
+const unsigned long frozenTimeMillis=6000;
 
 
 bool frozenResponse= false;
@@ -24,10 +30,24 @@ float totalGasValue=0;
 float minGasReading=0;
 float maxGasReading=0;
 unsigned long reportTimerMillis=0;
-const unsigned long reportMillis=30000; 
+const unsigned long reportMillis=6000; 
 
 float calibrationGain=1.0;
 float calibrationOffset=0.0;
+
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
+const char* mqttServer ="broker.hivemq.com";
+const int mqttPort =1883;
+const char* mqttTopic="Aathif/esp32/gas-monitor";
+
+
+// const int bufferCapacity=10;
+// int bufferCount=0;
+// unsigned long recordTimeStamp=0;
+// int bufferTail=0;
+// int bufferHead=0;
 
 void setup() {
   // put your setup code here, to run once:
@@ -44,16 +64,45 @@ Serial.println(calibrationGain);
 
 Serial.print("Loaded Offset: ");
 Serial.println(calibrationOffset);
+    WiFi.begin(ssid,password);
+    Serial.println("connecting to wifi ");
+
+    while(WiFi.status() != WL_CONNECTED){
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println("\nWifi connected");
+
+  //   bufferPref.begin("buffer",false);
+  //   bufferCount=bufferPref.getInt("count",0);
+
+
+  // bufferCount= bufferPref.getInt("count",0);
+
+  // bufferHead =bufferPref.getInt("head",0);
+  // bufferTail= bufferPref.getInt("tail",0);
+ mqttClient.setServer(mqttServer,mqttPort); 
+
+ if (!LittleFS.begin(false)) {
+    Serial.println("LittleFS mount failed");
+    return;
+}
+
+Serial.println("LittleFS mounted successfully");
+    sendSavedData();
 
 
   startMillis=millis();
   pinMode(MQ2_PIN, INPUT);
   Serial.println("Hello, ESP32!");
   Serial.println("MQ-2 is warming up");
+  
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
+
+    mqttClient.loop();
 
     if(Serial.available()){
       char command = Serial.read();
@@ -77,6 +126,10 @@ if (Serial.available()) {
     if (command == 'r') {
         ESP.restart();
     }
+}
+
+if(WiFi.status() ==WL_CONNECTED){
+  connectMqtt();
 }
 
 
@@ -158,6 +211,14 @@ Serial.println(calibratedValue);
     if(validCount>0){
 
       float avgGasValue =(float)totalGasValue/validCount;
+      unsigned long timeStamp = millis();
+
+if (mqttClient.connected()) {
+    publishSensorData(avgGasValue, minGasReading,
+                      maxGasReading, validCount, timeStamp);
+} else {
+    saveDataOffline(avgGasValue, timeStamp);
+}
 
       Serial.println("60'Sec Summary:");
       Serial.print("Average : ");
@@ -202,5 +263,91 @@ void updateOffset(float newOffset){
     Serial.println(preferences.getFloat("offset", 0.0));
 
 }
+
+
+
+// void savebufferCount(){
+// bufferPref.putInt("count",bufferCount);
+// bufferPref.putInt("head",bufferHead);
+// bufferPref.putInt("tail",bufferTail);
+// }
+// void saveRecord(float value,unsigned long timeStamp){
+
+
+//   if(bufferCount>=bufferCapacity){
+//     Serial.println("Buffer full! cannot save record");
+//     return;
+//   }
+// }
+// struct SensorRecord {
+//     float value;
+//     unsigned long timestamp;
+// };
   
-  
+  void saveDataOffline(float value, unsigned long timeStamp) {
+    File file = LittleFS.open("/offline_data.csv", FILE_APPEND);
+
+    if(!file){
+        Serial.println("Could not open file");
+        return;
+    }
+
+    file.print(timeStamp);
+    file.print(",");
+    file.println(value);
+
+    file.close();
+
+    Serial.println("Data saved offline");
+    sendSavedData();
+}
+
+void sendSavedData() {
+    File file = LittleFS.open("/offline_data.csv", FILE_READ);
+
+    if (!file || file.size()==0) {
+        if(file)file.close();
+        return;
+    }
+
+    while(file.available()) {
+        String line = file.readStringUntil('\n');
+        Serial.print("Saved record: ");
+        Serial.println(line);
+    }
+
+    file.close();
+}
+
+void connectMqtt(){
+  if (!mqttClient.connected()) {
+        Serial.println("Connecting to MQTT...");
+  if(mqttClient.connect("esp32-gas-monitor-001")){
+    Serial.println("MQTT connected");
+  }else{
+    Serial.print("MQTT connection Failed");
+    Serial.println(mqttClient.state());
+
+  }
+Serial.print("WiFi status: ");
+Serial.println(WiFi.status());
+}
+}
+
+void publishSensorData(float avg, float minVal,
+                       float maxVal, int count,
+                       unsigned long timeStamp) {
+
+    String payload = "{";
+    payload += "\"timestamp\":" + String(timeStamp) + ",";
+    payload += "\"average\":" + String(avg, 2) + ",";
+    payload += "\"minimum\":" + String(minVal, 2) + ",";
+    payload += "\"maximum\":" + String(maxVal, 2) + ",";
+    payload += "\"valid_count\":" + String(count);
+    payload += "}";
+
+    mqttClient.publish(mqttTopic, payload.c_str());
+
+    Serial.println("MQTT record published:");
+    Serial.println(payload);
+}

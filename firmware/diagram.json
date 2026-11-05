@@ -3,7 +3,7 @@
   "author": "Anonymous maker",
   "editor": "wokwi",
   "parts": [
-    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": -2.8, "left": -4.24, "attrs": {} },
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 0, "left": -4.76, "attrs": {} },
     { "type": "wokwi-gas-sensor", "id": "gas1", "top": 60.3, "left": -233, "attrs": {} }
   ],
   "connections": [
