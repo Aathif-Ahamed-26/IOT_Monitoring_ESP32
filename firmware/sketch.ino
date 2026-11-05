@@ -52,13 +52,15 @@ unsigned long mqttRetryInterval=5000;
 
 
 
+
+
 void setup() {
   // put your setup code here, to run once:
 
 
   
   Serial.begin(115200);
-
+  bufferPref.begin("buffer", false);
   preferences.begin("calibration", false);
   wifiRetryInterval = preferences.getULong("wifi_retry", 5000);
 mqttRetryInterval = preferences.getULong("mqtt_retry", 5000);
@@ -393,26 +395,38 @@ void sendSavedData() {
         if (file) file.close();
         return;
     }
+    int recordIndex = 0;
+int lastPublishedIndex = bufferPref.getInt("last_sent", 0);
 
     while (file.available()) {
 
         String line = file.readStringUntil('\n');
-
+        recordIndex++;
         unsigned long timeStamp;
         float avg, minVal, maxVal;
         int count;
 
-        sscanf(line.c_str(), "%lu,%f,%f,%f,%d",
-               &timeStamp, &avg, &minVal, &maxVal, &count);
+        int valuesRead = sscanf(line.c_str(), "%lu,%f,%f,%f,%d",
+                        &timeStamp, &avg, &minVal, &maxVal, &count);
 
+if (valuesRead != 5) {
+    Serial.println("Incomplete record found. Skipping it.");
+    continue;
+}
+if (recordIndex <= lastPublishedIndex) {
+    Serial.println("Record already published. Skipping.");
+    continue;
+}
         if (!publishSensorData(avg, minVal, maxVal, count, timeStamp)) {
     file.close();
     Serial.println("Publish failed. Keeping offline records.");
     return;
-}
+}bufferPref.putInt("last_sent", recordIndex);
     }
 
     file.close();
+    
+    bufferPref.putInt("last_sent", 0);
     LittleFS.remove("/offline_data.csv");
 Serial.println("Offline records cleared");
 }
