@@ -1,569 +1,902 @@
-#include<WiFi.h>
+#include <WiFi.h>
 #include <LittleFS.h>
 #include <Preferences.h>
 #include <PubSubClient.h>
 #include <esp_task_wdt.h>
 
-#include <time.h>
+#include "TimeManager.h"
+#include "SensorManager.h"
+#include "HealthManager.h"
+
+// Objects
+TimeManager timeManager;
+SensorManager sensorManager;
+HealthManager healthManager;
 
 Preferences preferences;
 Preferences bufferPref;
 
-String ssid = "Wokwi-GUEST";
-String password = "";
-
-
-const int MQ2_PIN=34;
-unsigned long prevMillis =0;
-const unsigned long interval =1000; //1000
-const unsigned long warmUpTime=3000;
-bool checkResponse = false;
-const int minGasValue=100;
-const int maxGasValue=4000;
-unsigned long startMillis=0;
-int lastGasValue=-1;
-unsigned long sameValueStartMillis=0;
-const unsigned long frozenTimeMillis=6000;
-
-
-bool frozenResponse= false;
-
-int validCount=0;
-float totalGasValue=0;
-float minGasReading=0;
-float maxGasReading=0;
-unsigned long reportTimerMillis=0;
-const unsigned long reportMillis=6000; 
-
-float calibrationGain=1.0;
-float calibrationOffset=0.0;
-
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
+// WiFi settings
+String ssid = "Wokwi-GUEST";
+String password = "";
+
+// MQTT settings
 String mqttServer = "broker.hivemq.com";
-const int mqttPort =1883;
-const char* mqttTopic="Aathif/devices/ESP32_001/gas-monitor";  //format: Aathif/devices/device id add it /gas-monitor
+const int mqttPort = 1883;
 
-const char* healthTopic = "Aathif/devices/ESP32_001/health";
+const char* mqttTopic =
+    "Aathif/devices/ESP32_001/gas-monitor";
 
-unsigned long lastWifiAttempt=0;
-unsigned long lastMqttAttempt=0;
+const char* healthTopic =
+    "Aathif/devices/ESP32_001/health";
 
-unsigned long wifiRetryInterval=5000;
-unsigned long mqttRetryInterval=5000;
+// Sensor settings
+const int MQ2_PIN = 34;
 
+unsigned long prevMillis = 0;
+const unsigned long interval = 1000;
 
+const unsigned long warmUpTime = 3000;
+unsigned long startMillis = 0;
 
+bool checkResponse = false;
 
+const int minGasValue = 100;
+const int maxGasValue = 4000;
+
+int lastGasValue = -1;
+unsigned long sameValueStartMillis = 0;
+
+const unsigned long frozenTimeMillis = 6000;
+bool frozenResponse = false;
+
+// Variables used to calculate sensor readings
+int validCount = 0;
+
+float totalGasValue = 0;
+float minGasReading = 0;
+float maxGasReading = 0;
+
+unsigned long reportTimerMillis = 0;
+const unsigned long reportMillis = 6000;
+
+// Calibration values
+float calibrationGain = 1.0;
+float calibrationOffset = 0.0;
+
+// WiFi and MQTT retry settings
+unsigned long lastWifiAttempt = 0;
+unsigned long lastMqttAttempt = 0;
+
+unsigned long wifiRetryInterval = 5000;
+unsigned long mqttRetryInterval = 5000;
+
+// Health report settings
 unsigned long lastHealthReport = 0;
 const unsigned long healthReportInterval = 60000;
 
 String lastError = "None";
 
+// Function declarations
+void updateGain(float newGain);
+void updateOffset(float newOffset);
 
-void syncTime() {
-    configTime(0, 0, "pool.ntp.org");
-    Serial.println("NTP time synchronization requested");
-}
-unsigned long getTimeStamp() {
-    time_t now;
-    time(&now);
+void saveDataOffline(
+    float avg,
+    float minVal,
+    float maxVal,
+    float count,
+    unsigned long timeStamp
+);
 
-    if (now < 1000000000) {
-        return 0;
-    }
+void sendSavedData();
+void connectMqtt();
 
-    return (unsigned long)now;
-}
+bool publishSensorData(
+    float avg,
+    float minVal,
+    float maxVal,
+    int count,
+    unsigned long timeStamp
+);
 
+void updateMqttServer(String newServer);
+
+void updateWifiCredentials(
+    String newSsid,
+    String newPassword
+);
+
+void updateRetryIntervals(
+    unsigned long newWifiInterval,
+    unsigned long newMqttInterval
+);
+
+void publishHealthStatus();
 
 
 void setup() {
-  // put your setup code here, to run once:
 
+    Serial.begin(115200);
 
-  
-  Serial.begin(115200);
-  bufferPref.begin("buffer", false);
-  preferences.begin("calibration", false);
-  wifiRetryInterval = preferences.getULong("wifi_retry", 5000);
-mqttRetryInterval = preferences.getULong("mqtt_retry", 5000);
-  mqttServer = preferences.getString("mqtt_server", "broker.hivemq.com");
-  ssid = preferences.getString("ssid", "Wokwi-GUEST");
-password = preferences.getString("password", "");
-Serial.print("Loaded WiFi SSID: ");
-Serial.println(ssid);
+    // Load saved settings
+    bufferPref.begin("buffer", false);
+    preferences.begin("calibration", false);
 
+    wifiRetryInterval =
+        preferences.getULong("wifi_retry", 5000);
 
+    mqttRetryInterval =
+        preferences.getULong("mqtt_retry", 5000);
 
-  Serial.print("Loaded MQTT Server: ");
- Serial.println(mqttServer);
-  calibrationGain=preferences.getFloat("gain",1.0);
-  calibrationOffset=preferences.getFloat("offset",0.0);
-Serial.print("Loaded Gain: ");
-Serial.println(calibrationGain);
+    mqttServer =
+        preferences.getString(
+            "mqtt_server",
+            "broker.hivemq.com"
+        );
 
-Serial.print("Loaded Offset: ");
-Serial.println(calibrationOffset);
-   WiFi.begin(ssid,password);
-   syncTime();
-Serial.println("WiFi connection started. Connecting in background...");
- 
- mqttClient.setServer(mqttServer.c_str(),mqttPort); 
+    ssid =
+        preferences.getString(
+            "ssid",
+            "Wokwi-GUEST"
+        );
 
- if (!LittleFS.begin(true)) {
-    Serial.println("LittleFS mount failed");
-    return;
-}
+    password =
+        preferences.getString("password", "");
 
-Serial.println("LittleFS mounted successfully");
-    
+    calibrationGain =
+        preferences.getFloat("gain", 1.0);
 
+    calibrationOffset =
+        preferences.getFloat("offset", 0.0);
 
-  startMillis=millis();
-  pinMode(MQ2_PIN, INPUT);
-  Serial.println("Hello, ESP32!");
-  Serial.println("MQ-2 is warming up");
-  esp_task_wdt_config_t wdt_config = {
-    .timeout_ms = 10000,
-    .idle_core_mask = 0,
-    .trigger_panic = true
-};
+    Serial.println("Device settings loaded");
 
-esp_task_wdt_reconfigure(&wdt_config);
-esp_task_wdt_add(NULL);
-
-  
-}
-
-void loop() {
-  // put your main code here, to run repeatedly:
-    esp_task_wdt_reset();
-//     while (true) {
-// }
-    mqttClient.loop();
-if (millis() - lastHealthReport >= healthReportInterval) {
-    lastHealthReport = millis();
-    publishHealthStatus();
-}
-
-if (Serial.available() > 0) {
-
-    String command = Serial.readStringUntil('\n');
-    command.trim();
-
-    Serial.print("Command received: ");
-    Serial.println(command);
-
-    if (command.startsWith("server")) {
-    String newServer = command.substring(7);
-    updateMqttServer(newServer);
-}
-if (command.startsWith("wifi ")) {
-
-    int separator = command.indexOf(' ', 5);
-
-    if (separator > 0) {
-        String newSsid = command.substring(5, separator);
-        String newPassword = command.substring(separator + 1);
-
-        updateWifiCredentials(newSsid, newPassword);
-    }
-}
-else if (command.startsWith("retry ")) {
-
-    int separator = command.indexOf(' ', 6);
-
-    if (separator > 0) {
-        unsigned long newWifi = command.substring(6, separator).toInt();
-        unsigned long newMqtt = command.substring(separator + 1).toInt();
-
-        if (newWifi >= 1000 && newMqtt >= 1000) {
-            updateRetryIntervals(newWifi, newMqtt);
-        } else {
-            Serial.println("Retry intervals must be at least 1000 ms");
-        }
-    } else {
-        Serial.println("Usage: retry 5000 7000");
-    }
-}else if (command == "status") {
-
-    Serial.println("\n--- DEVICE STATUS ---");
-
-    Serial.print("WiFi: ");
-    Serial.println(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
-
-    Serial.print("MQTT: ");
-    Serial.println(mqttClient.connected() ? "Connected" : "Disconnected");
+    Serial.print("WiFi SSID: ");
+    Serial.println(ssid);
 
     Serial.print("MQTT Server: ");
     Serial.println(mqttServer);
 
-    Serial.print("WiFi Retry: ");
-    Serial.print(wifiRetryInterval);
-    Serial.println(" ms");
+    Serial.print("Calibration Gain: ");
+    Serial.println(calibrationGain);
 
-    Serial.print("MQTT Retry: ");
-    Serial.print(mqttRetryInterval);
-    Serial.println(" ms");
+    Serial.print("Calibration Offset: ");
+    Serial.println(calibrationOffset);
 
-    Serial.print("Sensor Monitoring: ");
-    Serial.println(checkResponse ? "Enabled" : "Disabled");
+    // Start WiFi connection
+    WiFi.begin(ssid.c_str(), password.c_str());
 
-    Serial.println("---------------------");
-}
+    timeManager.syncTime();
 
-  else if (command.startsWith("g")) {
-        float value = command.substring(1).toFloat();
-        updateGain(value);
-        Serial.println("Gain updated and saved");
+    // Set MQTT server
+    mqttClient.setServer(
+        mqttServer.c_str(),
+        mqttPort
+    );
+
+    // Start LittleFS
+    if (!LittleFS.begin(true)) {
+        Serial.println("LittleFS mount failed");
+        return;
     }
 
-    else if (command.startsWith("o")) {
-        float value = command.substring(1).toFloat();
-        updateOffset(value);
-        Serial.println("Offset updated and saved");
-    }
+    Serial.println("LittleFS ready");
 
-    else if (command == "r") {
-        Serial.println("Restarting ESP32...");
-        ESP.restart();
-    }
+    // Start sensor
+    sensorManager.begin();
 
-    else if (command == "d") {
-        WiFi.disconnect();
-        Serial.println("WiFi disconnected");
-    }
+    startMillis = millis();
 
-    else if (command == "w") {
-        WiFi.begin(ssid.c_str(), password.c_str());
-        Serial.println("Connecting to WiFi...");
-    }
-    else if (command == "sd") {
-    checkResponse = true;
-    Serial.println("Sensor disconnected!");
-}
+    Serial.println("ESP32 started");
+    Serial.println("MQ2 sensor warming up...");
 
-else if (command == "sr") {
-    checkResponse = false;
-    Serial.println("Sensor reconnected!");
-}
-}
-if (WiFi.status() != WL_CONNECTED) {
-    if (millis() - lastWifiAttempt>=wifiRetryInterval) {
-        lastWifiAttempt=millis();
-        Serial.println("Reconnecting to WiFi...");
-        WiFi.begin(ssid.c_str(),password.c_str());
-    }
-}
-else {
-    connectMqtt();
+    // Configure watchdog
+    esp_task_wdt_config_t wdt_config = {
+        .timeout_ms = 10000,
+        .idle_core_mask = 0,
+        .trigger_panic = true
+    };
+
+    esp_task_wdt_reconfigure(&wdt_config);
+    esp_task_wdt_add(NULL);
 }
 
 
+void loop() {
 
+    esp_task_wdt_reset();
 
-  
-   if (checkResponse) {
-  
-    Serial.println("ERROR: No sensor response");
-  } else {
-  unsigned long currMillis=millis();
-  if(currMillis-startMillis >= warmUpTime){
-  if(currMillis-prevMillis >= interval){
-    prevMillis=currMillis;
-    bool isValid=true;
+    mqttClient.loop();
 
-  int gasvalue=analogRead(MQ2_PIN);
-  
-float calibratedValue= (gasvalue * calibrationGain)+calibrationOffset;
+    // Send health information periodically
+    if (millis() - lastHealthReport >= healthReportInterval) {
 
-  if(gasvalue==0){
-    isValid=false;
-    Serial.println("ERROR: no sensor response ");
-  }
-  else if(calibratedValue<minGasValue || calibratedValue > maxGasValue){
-  isValid=false;
-  Serial.println("ERROR:sensor out of range");
-  
-  }
-  else{
-    if(calibratedValue != lastGasValue){
-    lastGasValue = calibratedValue;
-    sameValueStartMillis = currMillis;
-    frozenResponse = false;
+        lastHealthReport = millis();
 
-    Serial.print("MQ2 VALUE: ");
-    Serial.println(calibratedValue);
-    Serial.print("Raw Value: ");
-Serial.println(gasvalue);
-
-Serial.print("Calibrated Value: ");
-Serial.println(calibratedValue);
-  }
-  else{
-    if(currMillis - sameValueStartMillis >= frozenTimeMillis){
-      isValid=false;
-    if(!frozenResponse){
-    Serial.println("ERROR: Sensor reading frozen");
-    frozenResponse =true;
-      }
-      
-    }
-    else{
-      Serial.print("MQ2 VALUE: ");
-      Serial.println(calibratedValue);
-      Serial.print("Raw Value: ");
-Serial.println(gasvalue);
-
-Serial.print("Calibrated Value: ");
-Serial.println(calibratedValue);
+        publishHealthStatus();
     }
 
-    
-  
-  }if(isValid){
-    totalGasValue+=calibratedValue;
-    validCount++;
-    if(validCount==1 || calibratedValue<minGasReading){
-      minGasReading=calibratedValue;}
-    if(validCount==1 || calibratedValue>maxGasReading){
-      maxGasReading=calibratedValue;}  
+    // Check for commands from Serial Monitor
+    if (Serial.available() > 0) {
 
-  }}}
-  
-  }
-  if(currMillis-reportTimerMillis>=reportMillis){
-    reportTimerMillis=currMillis;
+        String command = Serial.readStringUntil('\n');
+        command.trim();
 
-    if(validCount>0){
+        Serial.print("Received command: ");
+        Serial.println(command);
 
-      float avgGasValue =(float)totalGasValue/validCount;
-      unsigned long timeStamp = millis();
+        if (command.startsWith("server")) {
 
-if (mqttClient.connected()) {
-    publishSensorData(avgGasValue, minGasReading,
-                      maxGasReading, validCount, timeStamp);
-} else {unsigned long timeStamp = getTimeStamp();
-    saveDataOffline(avgGasValue, minGasReading,
-                maxGasReading, validCount, timeStamp);
-}
+            String newServer = command.substring(7);
 
-      Serial.println("60'Sec Summary:");
-      Serial.print("Average : ");
-      Serial.println((float)avgGasValue);
-      Serial.print("Minimum : ");
-      Serial.println(minGasReading);
-      Serial.print("Maximum : ");
-      Serial.println(maxGasReading);
-      Serial.print("ValidCount : ");
-      Serial.println(validCount);
+            updateMqttServer(newServer);
+        }
 
-      avgGasValue=0;
-      minGasReading=0;
-      maxGasReading=0;
-      validCount=0;
-      totalGasValue=0;
+        else if (command.startsWith("wifi ")) {
 
-    }else{
-       Serial.println("60'Sec Summary:");
-       Serial.println("No valid readings");
-       Serial.println("Valid count: 0 ");
+            int separator = command.indexOf(' ', 5);
 
+            if (separator > 0) {
+
+                String newSsid =
+                    command.substring(5, separator);
+
+                String newPassword =
+                    command.substring(separator + 1);
+
+                updateWifiCredentials(
+                    newSsid,
+                    newPassword
+                );
+            }
+        }
+
+        else if (command.startsWith("retry ")) {
+
+            int separator = command.indexOf(' ', 6);
+
+            if (separator > 0) {
+
+                unsigned long newWifi =
+                    command.substring(6, separator).toInt();
+
+                unsigned long newMqtt =
+                    command.substring(separator + 1).toInt();
+
+                if (newWifi >= 1000 && newMqtt >= 1000) {
+
+                    updateRetryIntervals(
+                        newWifi,
+                        newMqtt
+                    );
+                }
+                else {
+                    Serial.println(
+                        "Retry interval must be at least 1000 ms"
+                    );
+                }
+            }
+            else {
+                Serial.println("Usage: retry 5000 5000");
+            }
+        }
+
+        else if (command == "status") {
+
+            Serial.println("\nDevice Status");
+
+            Serial.print("WiFi: ");
+            Serial.println(
+                WiFi.status() == WL_CONNECTED
+                ? "Connected"
+                : "Disconnected"
+            );
+
+            Serial.print("MQTT: ");
+            Serial.println(
+                mqttClient.connected()
+                ? "Connected"
+                : "Disconnected"
+            );
+
+            Serial.print("MQTT Server: ");
+            Serial.println(mqttServer);
+
+            Serial.print("WiFi Retry: ");
+            Serial.println(wifiRetryInterval);
+
+            Serial.print("MQTT Retry: ");
+            Serial.println(mqttRetryInterval);
+
+            Serial.print("Sensor Monitoring: ");
+            Serial.println(
+                checkResponse ? "Disabled" : "Enabled"
+            );
+        }
+
+        else if (command.startsWith("g")) {
+
+            float value = command.substring(1).toFloat();
+
+            updateGain(value);
+
+            Serial.println("Gain updated");
+        }
+
+        else if (command.startsWith("o")) {
+
+            float value = command.substring(1).toFloat();
+
+            updateOffset(value);
+
+            Serial.println("Offset updated");
+        }
+
+        else if (command == "r") {
+
+            Serial.println("Restarting device...");
+            ESP.restart();
+        }
+
+        else if (command == "d") {
+
+            WiFi.disconnect();
+
+            Serial.println("WiFi disconnected");
+        }
+
+        else if (command == "w") {
+
+            WiFi.begin(
+                ssid.c_str(),
+                password.c_str()
+            );
+
+            Serial.println("Connecting to WiFi...");
+        }
+
+        else if (command == "sd") {
+
+            checkResponse = true;
+
+            Serial.println("Sensor disconnected");
+        }
+
+        else if (command == "sr") {
+
+            checkResponse = false;
+
+            Serial.println("Sensor reconnected");
+        }
     }
-  }
-}
+
+    // Reconnect WiFi if the connection is lost
+    if (WiFi.status() != WL_CONNECTED) {
+
+        if (millis() - lastWifiAttempt >= wifiRetryInterval) {
+
+            lastWifiAttempt = millis();
+
+            Serial.println("Trying to reconnect to WiFi...");
+
+            WiFi.begin(
+                ssid.c_str(),
+                password.c_str()
+            );
+        }
+    }
+    else {
+        connectMqtt();
+    }
+
+    // Check sensor readings
+    if (checkResponse) {
+
+        Serial.println("ERROR: No sensor response");
+    }
+    else {
+
+        unsigned long currMillis = millis();
+
+        if (currMillis - startMillis >= warmUpTime) {
+
+            if (currMillis - prevMillis >= interval) {
+
+                prevMillis = currMillis;
+
+                bool isValid = true;
+
+                int gasvalue = sensorManager.readRawValue();
+
+                float calibratedValue =
+                    sensorManager.applyCalibration(
+                        gasvalue,
+                        calibrationGain,
+                        calibrationOffset
+                    );
+
+                // Check if the sensor is responding
+                if (gasvalue == 0) {
+
+                    isValid = false;
+
+                    Serial.println("ERROR: No sensor response");
+                }
+
+                // Check whether the reading is within range
+                else if (
+                    calibratedValue < minGasValue ||
+                    calibratedValue > maxGasValue
+                ) {
+
+                    isValid = false;
+
+                    Serial.println("ERROR: Sensor out of range");
+                }
+
+                else {
+
+                    // Check if the sensor value is stuck
+                    if (calibratedValue != lastGasValue) {
+
+                        lastGasValue = calibratedValue;
+
+                        sameValueStartMillis = currMillis;
+
+                        frozenResponse = false;
+
+                        Serial.print("MQ2 Value: ");
+                        Serial.println(calibratedValue);
+
+                        Serial.print("Raw Value: ");
+                        Serial.println(gasvalue);
+
+                        Serial.print("Calibrated Value: ");
+                        Serial.println(calibratedValue);
+                    }
+                    else {
+
+                        if (
+                            currMillis - sameValueStartMillis >=
+                            frozenTimeMillis
+                        ) {
+
+                            isValid = false;
+
+                            if (!frozenResponse) {
+
+                                Serial.println(
+                                    "ERROR: Sensor reading frozen"
+                                );
+
+                                frozenResponse = true;
+                            }
+                        }
+                        else {
+
+                            Serial.print("MQ2 Value: ");
+                            Serial.println(calibratedValue);
+
+                            Serial.print("Raw Value: ");
+                            Serial.println(gasvalue);
+
+                            Serial.print("Calibrated Value: ");
+                            Serial.println(calibratedValue);
+                        }
+                    }
+                }
+
+                // Add the reading if it is valid
+                if (isValid) {
+
+                    totalGasValue += calibratedValue;
+
+                    validCount++;
+
+                    if (
+                        validCount == 1 ||
+                        calibratedValue < minGasReading
+                    ) {
+                        minGasReading = calibratedValue;
+                    }
+
+                    if (
+                        validCount == 1 ||
+                        calibratedValue > maxGasReading
+                    ) {
+                        maxGasReading = calibratedValue;
+                    }
+                }
+            }
+        }
+
+        // Send the collected readings every reporting interval
+        if (currMillis - reportTimerMillis >= reportMillis) {
+
+            reportTimerMillis = currMillis;
+
+            if (validCount > 0) {
+
+                float avgGasValue =
+                    totalGasValue / validCount;
+
+                unsigned long timeStamp =
+                    timeManager.getTimeStamp();
+
+                if (mqttClient.connected()) {
+
+                    publishSensorData(
+                        avgGasValue,
+                        minGasReading,
+                        maxGasReading,
+                        validCount,
+                        timeStamp
+                    );
+                }
+                else {
+
+                    saveDataOffline(
+                        avgGasValue,
+                        minGasReading,
+                        maxGasReading,
+                        validCount,
+                        timeStamp
+                    );
+                }
+
+                Serial.println("Sensor Summary");
+
+                Serial.print("Average: ");
+                Serial.println(avgGasValue);
+
+                Serial.print("Minimum: ");
+                Serial.println(minGasReading);
+
+                Serial.print("Maximum: ");
+                Serial.println(maxGasReading);
+
+                Serial.print("Valid Count: ");
+                Serial.println(validCount);
+
+                // Clear the values for the next report
+                totalGasValue = 0;
+                minGasReading = 0;
+                maxGasReading = 0;
+                validCount = 0;
+            }
+            else {
+
+                Serial.println("Sensor Summary");
+                Serial.println("No valid readings");
+            }
+        }
+    }
 }
 
-void updateGain(float newGain){
-  calibrationGain=newGain;
-  preferences.putFloat("gain",calibrationGain);
-  
+
+// Update and save calibration gain
+void updateGain(float newGain) {
+
+    calibrationGain = newGain;
+
+    preferences.putFloat("gain", calibrationGain);
+
     Serial.print("Saved Gain: ");
-    Serial.println(preferences.getFloat("gain", 1.0));
-
+    Serial.println(calibrationGain);
 }
 
-void updateOffset(float newOffset){
-  calibrationOffset=newOffset;
-  preferences.putFloat("offset",calibrationOffset);
 
-  Serial.print("Saved Offset: ");
-    Serial.println(preferences.getFloat("offset", 0.0));
+// Update and save calibration offset
+void updateOffset(float newOffset) {
 
+    calibrationOffset = newOffset;
+
+    preferences.putFloat("offset", calibrationOffset);
+
+    Serial.print("Saved Offset: ");
+    Serial.println(calibrationOffset);
 }
-  
-  void saveDataOffline( float avg, float minVal,
-                float maxVal, float count, unsigned long timeStamp) {
-    File file = LittleFS.open("/offline_data.csv", FILE_APPEND);
 
-    if(!file){
-        Serial.println("Could not open file");
+
+// Save readings locally when MQTT is unavailable
+void saveDataOffline(
+    float avg,
+    float minVal,
+    float maxVal,
+    float count,
+    unsigned long timeStamp
+) {
+
+    File file = LittleFS.open(
+        "/offline_data.csv",
+        FILE_APPEND
+    );
+
+    if (!file) {
+
+        Serial.println("Could not open offline file");
+
         return;
     }
 
     file.print(timeStamp);
     file.print(",");
+
     file.print(avg);
     file.print(",");
+
     file.print(minVal);
     file.print(",");
+
     file.print(maxVal);
     file.print(",");
+
     file.println(count);
+
     file.close();
 
-    Serial.println("Data saved offline");
-    
+    Serial.println("Data saved for later");
 }
+
+
+// Send locally saved records when MQTT reconnects
 void sendSavedData() {
 
-    File file = LittleFS.open("/offline_data.csv", FILE_READ);
+    File file = LittleFS.open(
+        "/offline_data.csv",
+        FILE_READ
+    );
 
     if (!file || file.size() == 0) {
-        if (file) file.close();
+
+        if (file) {
+            file.close();
+        }
+
         return;
     }
+
     int recordIndex = 0;
-int lastPublishedIndex = bufferPref.getInt("last_sent", 0);
+
+    int lastPublishedIndex =
+        bufferPref.getInt("last_sent", 0);
 
     while (file.available()) {
 
         String line = file.readStringUntil('\n');
+
         recordIndex++;
+
         unsigned long timeStamp;
-        float avg, minVal, maxVal;
+
+        float avg;
+        float minVal;
+        float maxVal;
+
         int count;
 
-        int valuesRead = sscanf(line.c_str(), "%lu,%f,%f,%f,%d",
-                        &timeStamp, &avg, &minVal, &maxVal, &count);
+        int valuesRead = sscanf(
+            line.c_str(),
+            "%lu,%f,%f,%f,%d",
+            &timeStamp,
+            &avg,
+            &minVal,
+            &maxVal,
+            &count
+        );
 
-if (valuesRead != 5) {
-    Serial.println("Incomplete record found. Skipping it.");
-    continue;
-}
-if (recordIndex <= lastPublishedIndex) {
-    Serial.println("Record already published. Skipping.");
-    continue;
-}
-        if (!publishSensorData(avg, minVal, maxVal, count, timeStamp)) {
-    file.close();
-    Serial.println("Publish failed. Keeping offline records.");
-    return;
-}bufferPref.putInt("last_sent", recordIndex);
+        if (valuesRead != 5) {
+
+            Serial.println("Invalid offline record");
+
+            continue;
+        }
+
+        if (recordIndex <= lastPublishedIndex) {
+
+            Serial.println("Skipping already sent record");
+
+            continue;
+        }
+
+        bool sent = publishSensorData(
+            avg,
+            minVal,
+            maxVal,
+            count,
+            timeStamp
+        );
+
+        if (!sent) {
+
+            file.close();
+
+            Serial.println("Could not send saved records");
+
+            return;
+        }
+
+        bufferPref.putInt("last_sent", recordIndex);
     }
 
     file.close();
-    
+
     bufferPref.putInt("last_sent", 0);
+
     LittleFS.remove("/offline_data.csv");
-Serial.println("Offline records cleared");
+
+    Serial.println("Saved records sent successfully");
 }
-void connectMqtt(){
-  if (!mqttClient.connected()) {
-        
+
+
+// Connect to MQTT broker
+void connectMqtt() {
+
+    if (!mqttClient.connected()) {
+
         if (millis() - lastMqttAttempt >= mqttRetryInterval) {
-            Serial.println("Connecting to MQTT...");
+
             lastMqttAttempt = millis();
-  if(mqttClient.connect("esp32-gas-monitor-001")){
-    Serial.println("MQTT connected");
-    sendSavedData();
-  }else{
-    Serial.print("MQTT connection Failed");
-    Serial.println(mqttClient.state());
 
-  }
-Serial.print("WiFi status: ");
-Serial.println(WiFi.status());
-}
-}
+            Serial.println("Connecting to MQTT...");
+
+            if (
+                mqttClient.connect("esp32-gas-monitor-001")
+            ) {
+
+                Serial.println("MQTT connected");
+
+                sendSavedData();
+            }
+            else {
+
+                Serial.print("MQTT connection failed: ");
+
+                Serial.println(mqttClient.state());
+            }
+
+            Serial.print("WiFi status: ");
+
+            Serial.println(WiFi.status());
+        }
+    }
 }
 
-bool publishSensorData(float avg, float minVal,
-                       float maxVal, int count,
-                       unsigned long timeStamp) {
+
+// Prepare and publish sensor data
+bool publishSensorData(
+    float avg,
+    float minVal,
+    float maxVal,
+    int count,
+    unsigned long timeStamp
+) {
 
     String payload = "{";
-payload += "\"device_id\":\"ESP32_001\",";
-payload += "\"firmware_version\":\"1.0.0\",";
-payload += "\"timestamp\":" + String(timeStamp) + ",";
-payload += "\"average\":" + String(avg, 2) + ",";
-payload += "\"minimum\":" + String(minVal, 2) + ",";
-payload += "\"maximum\":" + String(maxVal, 2) + ",";
-payload += "\"valid_count\":" + String(count);
-payload += "}";
 
-    bool success = mqttClient.publish(mqttTopic, payload.c_str());
+    payload += "\"device_id\":\"ESP32_001\",";
+    payload += "\"firmware_version\":\"1.0.0\",";
+    payload += "\"timestamp\":" + String(timeStamp) + ",";
+    payload += "\"average\":" + String(avg, 2) + ",";
+    payload += "\"minimum\":" + String(minVal, 2) + ",";
+    payload += "\"maximum\":" + String(maxVal, 2) + ",";
+    payload += "\"valid_count\":" + String(count);
 
-if (success) {
-    Serial.println("MQTT record published successfully:");
-    Serial.println(payload);
-} else {
-    Serial.println("MQTT publish failed");
-}
-    Serial.println("MQTT record published:");
-    Serial.println(payload);
+    payload += "}";
+
+    bool success = mqttClient.publish(
+        mqttTopic,
+        payload.c_str()
+    );
+
+    if (success) {
+
+        Serial.println("Data published:");
+
+        Serial.println(payload);
+    }
+    else {
+
+        Serial.println("Data publish failed");
+    }
+
     return success;
 }
+
+
+// Change MQTT broker address
 void updateMqttServer(String newServer) {
+
     mqttClient.disconnect();
 
     mqttServer = newServer;
 
     preferences.putString("mqtt_server", mqttServer);
 
-    Serial.print("New MQTT Server saved: ");
-    Serial.println(mqttServer);
+    mqttClient.setServer(
+        mqttServer.c_str(),
+        mqttPort
+    );
 
+    Serial.print("MQTT server updated: ");
+
+    Serial.println(mqttServer);
 }
-void updateWifiCredentials(String newSsid, String newPassword) {
+
+
+// Update WiFi details
+void updateWifiCredentials(
+    String newSsid,
+    String newPassword
+) {
 
     ssid = newSsid;
+
     password = newPassword;
 
     preferences.putString("ssid", ssid);
+
     preferences.putString("password", password);
 
     WiFi.disconnect();
-  WiFi.begin(ssid.c_str(), password.c_str());
 
-    Serial.println("WiFi credentials saved successfully");
+    WiFi.begin(
+        ssid.c_str(),
+        password.c_str()
+    );
 
+    Serial.println("WiFi details saved");
 }
-void updateRetryIntervals(unsigned long newWifiInterval, unsigned long newMqttInterval) {
+
+
+// Change WiFi and MQTT retry intervals
+void updateRetryIntervals(
+    unsigned long newWifiInterval,
+    unsigned long newMqttInterval
+) {
 
     wifiRetryInterval = newWifiInterval;
+
     mqttRetryInterval = newMqttInterval;
 
-    preferences.putULong("wifi_retry", wifiRetryInterval);
-    preferences.putULong("mqtt_retry", mqttRetryInterval);
+    preferences.putULong(
+        "wifi_retry",
+        wifiRetryInterval
+    );
 
-    Serial.println("Retry intervals saved successfully");
+    preferences.putULong(
+        "mqtt_retry",
+        mqttRetryInterval
+    );
+
+    Serial.println("Retry intervals updated");
 }
 
-void publishHealthStatus() {
-String payload = "{";
 
-payload += "\"uptime\":" + String(millis() / 1000) + ",";
-payload += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-payload += "\"wifi_connected\":";
-payload += (WiFi.status() == WL_CONNECTED ? "true" : "false");
-payload += ",";
-payload += "\"mqtt_connected\":";
-payload += (mqttClient.connected() ? "true" : "false");
-payload += ",";
-payload += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
-payload += "\"sensor_status\":";
-payload += (checkResponse ? "\"disconnected\"" : "\"connected\"");
-payload += ",";
-payload += "\"last_error\":\"" + lastError + "\",";
-payload += "\"reset_reason\":" + String((int)esp_reset_reason());
-payload += "}";
+// Send device health information
+void publishHealthStatus() {
+
+    String payload =
+        healthManager.createHealthPayload(
+            millis() / 1000,
+            mqttClient.connected(),
+            !checkResponse,
+            lastError
+        );
 
     if (mqttClient.connected()) {
-        mqttClient.publish(healthTopic, payload.c_str());
-        Serial.println("Health status published:");
+
+        mqttClient.publish(
+            healthTopic,
+            payload.c_str()
+        );
+
+        Serial.println("Health status sent:");
+
         Serial.println(payload);
     }
 }
